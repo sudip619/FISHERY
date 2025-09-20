@@ -1,21 +1,15 @@
+import requests
 import pandas as pd
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import OneHotEncoder
-import joblib
-import os
 import sys
+import numpy as np
 
 # --- Configuration ---
-# Make sure this matches the name of your main dataset
-TRAINING_DATA_FILE = "india_catch_500.csv" 
-MODEL_FILE = 'anomaly_model.pkl' # This will overwrite your existing model
-ENCODER_FILE = 'encoder.pkl'
+API_URL = "http://127.0.0.1:8000/detect-anomalies"
+TEST_DATA_FILE = "india_catch_5000.csv"
 
-print("--- Retraining Anomaly Detection Model ---")
+print("--- AquaBase API Test Client (Final JSON-Safe Version) ---")
 
-# --- 1. Define the Core Features for the Model ---
-# This dictionary maps the column names from your CSV to a standard format.
-# The model will ONLY be trained on these features.
+# --- 1. Define Column Mapping ---
 COLUMN_MAP = {
     'species_scientific_name': 'species_name',
     'weight_kg': 'weight_kg',
@@ -23,57 +17,48 @@ COLUMN_MAP = {
     'longitude': 'longitude',
     'fishing_method': 'gear_type'
 }
+API_REQUIRED_COLUMNS = list(COLUMN_MAP.keys()) + ['catch_id']
 
-# --- 2. Load and Preprocess the Dataset ---
-if not os.path.exists(TRAINING_DATA_FILE):
-    print(f"Error: Training data file not found at '{TRAINING_DATA_FILE}'")
+# --- 2. Load and Preprocess Data ---
+print(f"Reading test data from '{TEST_DATA_FILE}'...")
+try:
+    df_full = pd.read_csv(TEST_DATA_FILE)
+except FileNotFoundError:
+    print(f"--- ERROR: File not found: '{TEST_DATA_FILE}' ---")
     sys.exit(1)
 
-print(f"Loading data from '{TRAINING_DATA_FILE}'...")
-df = pd.read_csv(TRAINING_DATA_FILE)
-
-# Check if all required source columns exist in the file
-source_columns = list(COLUMN_MAP.keys())
-if not all(col in df.columns for col in source_columns):
-    print(f"Error: Your CSV is missing one of the required columns: {source_columns}")
+if not all(col in df_full.columns for col in API_REQUIRED_COLUMNS):
+    print(f"--- ERROR: Your CSV is missing required columns: {API_REQUIRED_COLUMNS} ---")
     sys.exit(1)
 
-# Rename columns to our standard format
-df.rename(columns=COLUMN_MAP, inplace=True)
+df_api_input = df_full[API_REQUIRED_COLUMNS].copy()
+df_api_input.rename(columns=COLUMN_MAP, inplace=True)
 
-# --- 3. Clean and Prepare Data for AI ---
-print("Preparing data for the AI model...")
-core_features = list(COLUMN_MAP.values())
-df_features = df[core_features].copy()
+# --- 3. THE CRUCIAL FIX: Make Data JSON-Safe ---
+# Replace pandas' NaN with Python's None, which converts to 'null' in JSON.
+df_processed = df_api_input.replace({np.nan: None})
 
-# Clean numerical data
-for col in ['latitude', 'longitude', 'weight_kg']:
-    df_features[col] = pd.to_numeric(df_features[col], errors='coerce')
+# --- 4. Send Request to the API ---
+data_to_send = df_processed.to_dict(orient='records')
+request_payload = {"data": data_to_send}
+print(f"Prepared {len(data_to_send)} JSON-safe records to send.")
 
-# Drop any rows with missing essential data for training
-df_features.dropna(inplace=True)
+try:
+    response = requests.post(API_URL, json=request_payload)
+    response.raise_for_status()
+except requests.exceptions.RequestException as e:
+    print(f"\n--- API ERROR: {e} ---")
+    print("Please check your FastAPI server terminal for detailed errors.")
+    sys.exit(1)
 
-# Separate features for encoding
-numerical_df = df_features[['latitude', 'longitude', 'weight_kg']]
-categorical_df = df_features[['species_name', 'gear_type']]
+# --- 5. Print the Results ---
+print("\n--- API Response Received ---")
+result = response.json()
+anomalous_ids = result.get('anomalous_catch_ids', [])
 
-# --- 4. Encode and Train ---
-encoder = OneHotEncoder(handle_unknown='ignore')
-encoded_cats = encoder.fit_transform(categorical_df)
-encoded_df = pd.DataFrame(encoded_cats.toarray())
-
-# Combine final features
-df_processed = pd.concat([numerical_df.reset_index(drop=True), encoded_df], axis=1)
-df_processed.columns = df_processed.columns.astype(str)
-
-print("Training the Isolation Forest model...")
-model = IsolationForest(contamination=0.01, random_state=42)
-model.fit(df_processed)
-
-# --- 5. Save the Model and Encoder ---
-joblib.dump(model, MODEL_FILE)
-joblib.dump(encoder, ENCODER_FILE)
-
-print(f"\n--- Success! ---")
-print(f"Model successfully retrained and saved to: {MODEL_FILE}")
-print(f"Encoder successfully saved to: {ENCODER_FILE}")
+print(f"\n--- Test Result ---")
+if not anomalous_ids:
+    print("ℹ️  The API did not flag any records as anomalies.")
+else:
+    print(f"✅ SUCCESS: The API identified {len(anomalous_ids)} record(s) as anomalies.")
+    print("The following catch_ids were flagged: " + ", ".join(map(str, sorted(anomalous_ids))))

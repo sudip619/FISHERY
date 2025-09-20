@@ -7,7 +7,7 @@ import sys
 
 # --- Configuration ---
 # The new, richer CSV file you are using for training
-TRAINING_DATA_FILE = "india_catch_500.csv" 
+TRAINING_DATA_FILE = "india_catch_5000.csv" 
 MODEL_FILE = 'anomaly_model.pkl' # We are overwriting the original model
 ENCODER_FILE = 'encoder.pkl'
 
